@@ -15,4 +15,8 @@ RUN pip install --upgrade pip && \
 
 COPY . .
 
-CMD ["uvicorn", "app.main:app", "--host", "0.0.0.0", "--port", "8000"]
+# Create required directories
+RUN mkdir -p uploads data models
+
+# Use Railway's PORT environment variable
+CMD ["sh", "-c", "uvicorn app.main:app --host 0.0.0.0 --port ${PORT:-8000}"]
