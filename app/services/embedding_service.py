@@ -23,12 +23,11 @@ class EmbeddingService:
         self.model_name = model_name
         self.model = None
         self.index = None
-        self.chunk_metadata = {}  
-        self.embedding_dim = 384  
+        self.chunk_metadata = {}
+        self.embedding_dim = 384
         self.next_embedding_id = 0
         self.model_loaded = False
         
-        # Gemini setup (optional)
         self.gemini_api_key = os.getenv("GEMINI_API_KEY")
         self.gemini_model = None
         self.gemini_enabled = False
@@ -55,11 +54,10 @@ class EmbeddingService:
         try:
             genai.configure(api_key=self.gemini_api_key)
             
-            # Try different model names in order of preference
             model_names = [
-                'gemini-1.5-flash',  # Newest and fastest
-                'gemini-1.5-pro',   # More capable but slower
-                'gemini-pro',       # Fallback
+                'gemini-1.5-flash',
+                'gemini-1.5-pro',
+                'gemini-pro',
                 'models/gemini-1.5-flash',
                 'models/gemini-1.5-pro'
             ]
@@ -67,7 +65,6 @@ class EmbeddingService:
             for model_name in model_names:
                 try:
                     self.gemini_model = genai.GenerativeModel(model_name)
-                    # Test the model
                     test_response = self.gemini_model.generate_content("Hello")
                     if test_response and test_response.text:
                         self.gemini_enabled = True
@@ -189,7 +186,6 @@ class EmbeddingService:
             return {}
     
     def _basic_search(self, query: str, top_k: int, score_threshold: float, doc_id: str = None) -> List[Dict]:
-        """Enhanced basic search with better relevance filtering"""
         try:
             if not self.model_loaded:
                 self._ensure_model_loaded()
@@ -203,7 +199,6 @@ class EmbeddingService:
             if query_embedding.size == 0:
                 return []
             
-            # Get more results initially for better filtering
             search_k = min(top_k * 4, self.index.ntotal) if doc_id else min(top_k * 2, self.index.ntotal)
             scores, indices = self.index.search(query_embedding.astype('float32'), search_k)
             
@@ -237,9 +232,6 @@ class EmbeddingService:
             return []
     
     def analyze_query_context(self, query: str, search_results: List[Dict]) -> Dict:
-        """
-        Analyze if the search results can answer the query using LLM
-        """
         if not self.gemini_enabled or not search_results:
             return {
                 "can_answer": len(search_results) > 0,
@@ -250,13 +242,11 @@ class EmbeddingService:
             }
         
         try:
-            # Combine top search results for context
             combined_context = "\n\n".join([
                 f"Page {result['page']}: {result['context'][:300]}"
                 for result in search_results[:5]
             ])
             
-            # First: Check relevance
             relevance_prompt = f"""
             Analyze if the provided document content can answer the user's question.
             
@@ -286,7 +276,6 @@ class EmbeddingService:
                     "answer_type": "not_available"
                 }
             
-            # Second: Generate contextual answer
             answer_prompt = f"""
             Based on the document content provided, answer the user's question accurately and concisely.
             
@@ -307,10 +296,7 @@ class EmbeddingService:
             answer_response = self.gemini_model.generate_content(answer_prompt)
             contextual_answer = answer_response.text.strip() if answer_response.text else ""
             
-            # Calculate confidence
             confidence = self._calculate_answer_confidence(relevance, contextual_answer, search_results)
-            
-            # Determine answer type
             answer_type = self._determine_answer_type(contextual_answer, relevance, confidence)
             
             return {
@@ -332,10 +318,8 @@ class EmbeddingService:
             }
     
     def _calculate_answer_confidence(self, relevance: str, answer: str, search_results: list) -> float:
-        """Calculate confidence score for the generated answer"""
         confidence = 0.0
         
-        # Base confidence from relevance check
         if relevance == "RELEVANT":
             confidence += 0.6
         elif relevance == "PARTIAL":
@@ -343,12 +327,10 @@ class EmbeddingService:
         else:
             confidence += 0.1
         
-        # Boost confidence based on search result scores
         if search_results:
             avg_score = sum(r.get('score', 0) for r in search_results[:3]) / min(3, len(search_results))
             confidence += min(0.3, avg_score * 0.5)
         
-        # Reduce confidence for vague answers
         vague_indicators = [
             "partial information", "not entirely clear", "may be", "possibly",
             "unable to determine", "not specified", "unclear"
@@ -357,14 +339,12 @@ class EmbeddingService:
         if any(indicator in answer.lower() for indicator in vague_indicators):
             confidence *= 0.7
         
-        # Boost confidence for specific answers with page references
         if "page" in answer.lower() and any(char.isdigit() for char in answer):
             confidence += 0.1
         
         return min(1.0, confidence)
     
     def _determine_answer_type(self, answer: str, relevance: str, confidence: float) -> str:
-        """Categorize the type of answer provided"""
         answer_lower = answer.lower()
         
         if confidence < 0.3 or relevance == "NOT_RELEVANT":
@@ -377,11 +357,7 @@ class EmbeddingService:
             return "basic"
     
     def search_with_context_analysis(self, query: str, top_k: int = 5, doc_id: str = None) -> Dict:
-        """
-        Enhanced search that provides both results and contextual analysis
-        """
         try:
-            # Get search results
             search_results = self._basic_search(
                 query=query,
                 top_k=top_k,
@@ -389,7 +365,6 @@ class EmbeddingService:
                 doc_id=doc_id
             )
             
-            # Analyze context if LLM available
             context_analysis = self.analyze_query_context(query, search_results)
             
             return {
@@ -409,7 +384,6 @@ class EmbeddingService:
             
         except Exception as e:
             logger.error(f"Error in search with context analysis: {str(e)}")
-            # Fallback to basic search
             search_results = self._basic_search(query, top_k, 0.25, doc_id)
             return {
                 "query": query,
@@ -425,7 +399,6 @@ class EmbeddingService:
     
     def search_similar(self, query: str, top_k: int = 5, score_threshold: float = 0.3, 
                       doc_id: str = None, use_gemini_enhancement: bool = True) -> List[Dict]:
-        """Legacy method for backward compatibility"""
         try:
             if not self.model_loaded:
                 self._ensure_model_loaded()
@@ -434,7 +407,6 @@ class EmbeddingService:
                 logger.warning("Index is empty - no documents have been indexed yet")
                 return []
             
-            # Use enhanced search if Gemini enabled and requested
             if use_gemini_enhancement and self.gemini_enabled:
                 return self._enhanced_search_with_gemini(query, top_k, score_threshold, doc_id)
             else:
@@ -445,21 +417,16 @@ class EmbeddingService:
             return self._basic_search(query, top_k, score_threshold, doc_id)
     
     def _enhanced_search_with_gemini(self, query: str, top_k: int, score_threshold: float, doc_id: str = None) -> List[Dict]:
-        """Enhanced search with query expansion"""
         try:
-            # Get basic search results first
             basic_results = self._basic_search(query, top_k * 2, score_threshold, doc_id)
             
             if not basic_results:
                 return basic_results
             
-            # Enhance query with Gemini
             enhanced_queries = self._generate_query_variations(query)
-            
-            # Search with enhanced queries
             all_results = {}
             
-            for search_query in enhanced_queries[:3]:  # Limit to 3 queries
+            for search_query in enhanced_queries[:3]:
                 query_results = self._basic_search(search_query, top_k, score_threshold, doc_id)
                 
                 for result in query_results:
@@ -467,7 +434,6 @@ class EmbeddingService:
                     if key not in all_results or all_results[key]['score'] < result['score']:
                         all_results[key] = result
             
-            # Sort and return top results
             final_results = sorted(all_results.values(), key=lambda x: x['score'], reverse=True)
             return final_results[:top_k]
             
@@ -476,7 +442,6 @@ class EmbeddingService:
             return self._basic_search(query, top_k, score_threshold, doc_id)
     
     def _generate_query_variations(self, query: str) -> List[str]:
-        """Generate query variations using LLM"""
         if not self.gemini_enabled:
             return [query]
         
@@ -492,20 +457,19 @@ class EmbeddingService:
             """
             
             response = self.gemini_model.generate_content(prompt)
-            variations = [query]  # Always include original
+            variations = [query]
             
             if response and response.text:
                 lines = response.text.strip().split('\n')
                 for line in lines:
                     line = line.strip()
-                    # Clean up any numbering or formatting
                     line = re.sub(r'^\d+\.?\s*', '', line)
                     line = line.strip('"-')
                     
                     if line and line != query and len(line) > 3:
                         variations.append(line)
             
-            return variations[:3]  # Limit to 3 total
+            return variations[:3]
             
         except Exception as e:
             logger.error(f"Error generating query variations: {e}")

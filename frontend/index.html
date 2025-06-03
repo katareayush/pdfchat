@@ -301,7 +301,6 @@
         .llm-answer-header {
             display: flex;
             align-items: center;
-            justify-content: space-between;
             margin-bottom: 12px;
         }
 
@@ -312,28 +311,6 @@
             display: flex;
             align-items: center;
             gap: 8px;
-        }
-
-        .confidence-badge {
-            padding: 4px 8px;
-            border-radius: 6px;
-            font-size: 12px;
-            font-weight: 600;
-        }
-
-        .confidence-high {
-            background: #065f46;
-            color: #d1fae5;
-        }
-
-        .confidence-medium {
-            background: #78350f;
-            color: #fcd34d;
-        }
-
-        .confidence-low {
-            background: #7f1d1d;
-            color: #fecaca;
         }
 
         .llm-answer-content {
@@ -556,7 +533,6 @@
             elements.chatInput.addEventListener('keydown', handleKeyDown);
             elements.chatInput.addEventListener('input', autoResize);
 
-            // Drag and drop
             elements.uploadArea.addEventListener('dragover', (e) => {
                 e.preventDefault();
                 elements.uploadArea.style.borderColor = '#6b7280';
@@ -575,6 +551,9 @@
                 }
             });
         }
+
+        
+
 
         function handleKeyDown(e) {
             if (e.key === 'Enter' && !e.shiftKey) {
@@ -810,30 +789,43 @@
             const loadingMessage = addMessage('', false, true);
 
             try {
-                // Phase 1: Fast search results
-                const fastResults = await performFastSearch(query);
-                loadingMessage.remove();
-                
-                if (fastResults && fastResults.results && fastResults.results.length > 0) {
-                    const messageId = Date.now();
-                    const resultContent = createSearchResultsHTML(fastResults, query, messageId);
-                    const resultMessage = addMessage(resultContent, false);
-                    
-                    // Phase 2: LLM Enhancement in background
-                    enhanceWithLLMAnalysis(query, messageId, resultMessage);
-                } else {
-                    const noResultsMessage = fastResults.message || "I couldn't find any relevant information about that topic in your document.";
-                    
-                    // Still try LLM analysis even with no results
-                    const llmResponse = await performLLMAnalysis(query, "");
-                    let finalMessage = `${noResultsMessage} Try using different keywords or check if the topic is covered in the document.`;
-                    
-                    if (llmResponse && llmResponse.contextual_answer) {
-                        finalMessage += createLLMAnswerHTML(llmResponse, true);
+                const response = await fetch(
+                    `${API_BASE}/search/enhanced?query=${encodeURIComponent(query)}&top_k=5&doc_id=${state.currentDoc.doc_id}`,
+                    {
+                        method: 'GET',
+                        headers: { 'Accept': 'application/json' }
                     }
-                    
-                    addMessage(finalMessage, false);
+                );
+
+                loadingMessage.remove();
+
+                if (!response.ok) {
+                    throw new Error(`Search failed: ${response.status}`);
                 }
+
+                const enhancedResult = await response.json();
+                console.log('Enhanced search result:', enhancedResult);
+
+                let responseContent = '';
+
+                if (enhancedResult.results && enhancedResult.results.length > 0) {
+                    responseContent += createSearchResultsHTML(enhancedResult, query);
+                } else {
+                    responseContent = `
+                        <div style="color: #9ca3af; text-align: center; padding: 16px;">
+                            I couldn't find any relevant information about that topic in your document.
+                        </div>
+                    `;
+                }
+
+                if (enhancedResult.contextual_answer) {
+                    const llmHTML = createLLMAnswerHTML(enhancedResult);
+                    if (llmHTML) {
+                        responseContent += llmHTML;
+                    }
+                }
+
+                addMessage(responseContent, false);
 
             } catch (error) {
                 console.error('Search error:', error);
@@ -845,177 +837,30 @@
             }
         }
 
-        async function performFastSearch(query) {
-            try {
-                const response = await fetch(
-                    `${API_BASE}/search/fast?query=${encodeURIComponent(query)}&top_k=6&score_threshold=0.25&doc_id=${state.currentDoc.doc_id}`,
-                    {
-                        method: 'GET',
-                        headers: { 'Accept': 'application/json' }
-                    }
-                );
-
-                if (response.ok) {
-                    return await response.json();
-                } else {
-                    throw new Error(`Fast search failed: ${response.status}`);
-                }
-            } catch (error) {
-                console.error('Fast search error:', error);
-                return {
-                    query: query,
-                    results: [],
-                    total_found: 0,
-                    search_time_ms: 0,
-                    message: "Search temporarily unavailable"
-                };
-            }
-        }
-
-        async function enhanceWithLLMAnalysis(query, messageId, resultMessageElement) {
-            try {
-                // Show processing indicator
-                const processingDiv = document.createElement('div');
-                processingDiv.className = 'llm-processing';
-                processingDiv.innerHTML = '<div class="spinner-small"></div>Analyzing context with AI...';
-                resultMessageElement.querySelector('.message-content').appendChild(processingDiv);
-
-                // Get enhanced analysis
-                const enhancedResult = await performLLMAnalysis(query, null);
-                
-                // Remove processing indicator
-                processingDiv.remove();
-                
-                console.log('Enhanced result received:', enhancedResult); // Debug log
-                
-                if (enhancedResult && enhancedResult.contextual_answer) {
-                    // Add LLM answer to the message
-                    const llmAnswerHTML = createLLMAnswerHTML(enhancedResult);
-                    console.log('Generated LLM HTML:', llmAnswerHTML); // Debug log
-                    
-                    if (llmAnswerHTML) {
-                        const llmDiv = document.createElement('div');
-                        llmDiv.innerHTML = llmAnswerHTML;
-                        resultMessageElement.querySelector('.message-content').appendChild(llmDiv.firstChild);
-                    }
-                } else {
-                    console.log('No contextual answer in result:', enhancedResult);
-                    // Show fallback message
-                    const fallbackDiv = document.createElement('div');
-                    fallbackDiv.className = 'llm-answer';
-                    fallbackDiv.innerHTML = `
-                        <div class="llm-answer-header">
-                            <div class="llm-answer-title">
-                                🤖 AI Analysis
-                            </div>
-                        </div>
-                        <div class="llm-answer-content">
-                            Unable to provide contextual analysis at this time.
-                        </div>
-                    `;
-                    resultMessageElement.querySelector('.message-content').appendChild(fallbackDiv);
-                }
-
-            } catch (error) {
-                console.error('LLM enhancement error:', error);
-                // Remove processing indicator on error
-                const processingDiv = resultMessageElement.querySelector('.llm-processing');
-                if (processingDiv) {
-                    processingDiv.remove();
-                }
-                
-                // Show error message
-                const errorDiv = document.createElement('div');
-                errorDiv.className = 'llm-answer not-available';
-                errorDiv.innerHTML = `
-                    <div class="llm-answer-header">
-                        <div class="llm-answer-title">
-                            ❌ Analysis Error
-                        </div>
-                    </div>
-                    <div class="llm-answer-content">
-                        Unable to analyze content: ${error.message}
-                    </div>
-                `;
-                resultMessageElement.querySelector('.message-content').appendChild(errorDiv);
-            }
-        }
-
-        async function performLLMAnalysis(query, contextOverride = null) {
-            try {
-                console.log('Performing LLM analysis for query:', query); // Debug log
-                
-                const url = `${API_BASE}/search/enhanced?query=${encodeURIComponent(query)}&top_k=5&doc_id=${state.currentDoc.doc_id}`;
-                console.log('LLM Analysis URL:', url); // Debug log
-                
-                const response = await fetch(url, {
-                    method: 'GET',
-                    headers: { 'Accept': 'application/json' }
-                });
-
-                console.log('LLM Analysis response status:', response.status); // Debug log
-
-                if (response.ok) {
-                    const result = await response.json();
-                    console.log('LLM Analysis result:', result); // Debug log
-                    return result;
-                } else {
-                    const errorText = await response.text();
-                    console.warn('LLM analysis failed:', response.status, errorText);
-                    return null;
-                }
-            } catch (error) {
-                console.error('LLM analysis error:', error);
-                return null;
-            }
-        }
-
-        function createLLMAnswerHTML(enhancedResult, isNoResults = false) {
-            console.log('Creating LLM Answer HTML with:', enhancedResult); // Debug log
+        function createLLMAnswerHTML(enhancedResult) {
+            console.log('Creating LLM Answer HTML with:', enhancedResult);
             
-            if (!enhancedResult) {
-                console.log('No enhanced result provided');
+            if (!enhancedResult || !enhancedResult.contextual_answer) {
+                console.log('No contextual answer found');
                 return '';
             }
 
-            // Check for contextual_answer in the response
-            let contextualAnswer = enhancedResult.contextual_answer;
-            
-            if (!contextualAnswer) {
-                console.log('No contextual_answer found in:', enhancedResult);
-                return '';
-            }
-
-            const confidence = enhancedResult.confidence_score || 0;
+            const contextualAnswer = enhancedResult.contextual_answer;
             const answerType = enhancedResult.answer_type || 'basic';
+            
             const isNotAvailable = answerType === 'not_available' || 
                                  contextualAnswer.toLowerCase().includes('not available') ||
-                                 contextualAnswer.toLowerCase().includes('this information is not available') ||
-                                 confidence < 0.3;
-
-            let confidenceClass = 'confidence-low';
-            let confidenceText = 'Low';
-            
-            if (confidence > 0.7) {
-                confidenceClass = 'confidence-high';
-                confidenceText = 'High';
-            } else if (confidence > 0.4) {
-                confidenceClass = 'confidence-medium';
-                confidenceText = 'Medium';
-            }
+                                 contextualAnswer.toLowerCase().includes('this information is not available');
 
             const cssClass = isNotAvailable ? 'llm-answer not-available' : 'llm-answer';
             const icon = isNotAvailable ? '❌' : '🤖';
             const title = isNotAvailable ? 'Information Not Available' : 'AI Analysis';
 
-            const html = `
+            return `
                 <div class="${cssClass}">
                     <div class="llm-answer-header">
                         <div class="llm-answer-title">
                             ${icon} ${title}
-                        </div>
-                        <div class="confidence-badge ${confidenceClass}">
-                            ${confidenceText} Confidence (${Math.round(confidence * 100)}%)
                         </div>
                     </div>
                     <div class="llm-answer-content">
@@ -1023,17 +868,22 @@
                     </div>
                 </div>
             `;
-            
-            console.log('Generated HTML:', html); // Debug log
-            return html;
         }
 
-        function createSearchResultsHTML(results, query, messageId) {
-            const searchTime = results.search_time_ms.toFixed(1);
+        function createSearchResultsHTML(results, query) {
+            if (!results.results || results.results.length === 0) {
+                return `
+                    <div style="color: #9ca3af; text-align: center; padding: 16px;">
+                        No relevant content found for your query.
+                    </div>
+                `;
+            }
+
+            const searchTime = results.search_time_ms ? results.search_time_ms.toFixed(1) : '0.0';
             const uniqueResults = results.results.slice(0, 6);
             
             let html = `
-                <div class="search-results" data-message-id="${messageId}">
+                <div class="search-results">
                     <div class="result-header">
                         <div>
                             <h4>Found ${uniqueResults.length} relevant page${uniqueResults.length !== 1 ? 's' : ''}</h4>
@@ -1043,7 +893,7 @@
             `;
 
             uniqueResults.forEach((result, index) => {
-                let displayText = result.context;
+                let displayText = result.context || '';
 
                 if (displayText.length > 350) {
                     const truncated = displayText.substring(0, 350);
@@ -1058,7 +908,7 @@
                 html += `
                     <div class="result-item">
                         <div class="result-meta">
-                            <span class="page-badge">Page ${result.page}</span>
+                            <span class="page-badge">Page ${result.page || 'N/A'}</span>
                         </div>
                         <div class="result-text">
                             ${displayText}
@@ -1069,6 +919,10 @@
 
             html += '</div>';
             return html;
+        }
+
+        function escapeRegex(string) {
+            return string.replace(/[\\^$.*+?()[\]{}|]/g, '\\$&');
         }
 
         if (document.readyState === 'loading') {
