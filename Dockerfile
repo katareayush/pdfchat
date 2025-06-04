@@ -15,7 +15,7 @@ RUN pip install --upgrade pip && \
 
 # Fix the copy paths - this is the key change
 COPY app/ ./app/
-COPY frontend/ ./frontend/
+COPY display/ ./display/
 
 # Debug to verify
 RUN echo "=== Files in /app ===" && ls -la
