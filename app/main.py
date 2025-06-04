@@ -25,21 +25,19 @@ ENVIRONMENT = os.getenv("ENVIRONMENT", "development")
 CORS_ORIGINS = [
     "http://127.0.0.1:5500",
     "http://127.0.0.1:8000",
-    "http://localhost:5500",
-    "http://localhost:8000",
     "null",
 ]
 
 if ENVIRONMENT == "production":
     CORS_ORIGINS.extend([
-        "https://testproject-production-b850.up.railway.app",  
+        "https://testproject-production-b850.up.railway.app/",
     ])
 
 app = FastAPI(
     title="PDF RAG API",
     description="A FastAPI application for PDF upload, text extraction, and semantic search with RAG capabilities",
     version="1.0.0",
-    docs_url="/docs", 
+    docs_url="/docs",  
     redoc_url="/redoc"
 )
 
@@ -92,7 +90,7 @@ app.include_router(search_router, prefix="/api/v1", tags=["Search & Embeddings"]
 async def startup_event():
     logger.info("Starting PDF RAG API...")
     logger.info(f"Environment: {ENVIRONMENT}")
-    logger.info(f"CORS Origins: {CORS_ORIGINS}")
+    logger.info(f"CORS Origins: {CORS_ORIGINS[:3]}... (+{len(CORS_ORIGINS)-3} more)")
     
     for dir_path in ["uploads", "data", "models"]:
         Path(dir_path).mkdir(exist_ok=True)
@@ -104,8 +102,7 @@ async def startup_event():
     logger.info(f"Frontend index.html exists: {frontend_index.exists()}")
     
     if frontend_path.exists():
-        files = list(frontend_path.iterdir())
-        logger.info(f"Frontend files: {[f.name for f in files]}")
+        logger.info(f"Frontend files: {list(frontend_path.iterdir())}")
     
     try:
         from app.services.embedding_service import embedding_service
@@ -123,6 +120,7 @@ async def shutdown_event():
 
 @app.get("/api/status")
 async def api_status():
+    """API-only status endpoint"""
     return {
         "message": "PDF RAG API",
         "version": "1.0.0",
@@ -185,7 +183,7 @@ if frontend_dir.exists():
 async def root():
     frontend_file = Path("frontend/index.html")
     if frontend_file.exists():
-        logger.info("Serving frontend index.html from root")
+        logger.info("Serving frontend index.html")
         return FileResponse(frontend_file)
     else:
         logger.warning("Frontend index.html not found, serving API info")
@@ -201,14 +199,11 @@ async def root():
 
 @app.get("/{full_path:path}")
 async def serve_frontend(full_path: str):
-    if (full_path.startswith("api/") or 
-        full_path.startswith("docs") or 
-        full_path.startswith("redoc") or
-        full_path == "health" or
-        full_path.startswith("static/")):
+    # Don't intercept API routes
+    if full_path.startswith("api/") or full_path.startswith("docs") or full_path.startswith("redoc"):
         return JSONResponse(
             status_code=404,
-            content={"detail": "Endpoint not found", "path": full_path}
+            content={"detail": "API endpoint not found", "path": full_path}
         )
     
     frontend_file = Path("frontend/index.html")
