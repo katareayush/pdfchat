@@ -25,22 +25,22 @@ ENVIRONMENT = os.getenv("ENVIRONMENT", "development")
 CORS_ORIGINS = [
     "http://127.0.0.1:5500",
     "http://127.0.0.1:8000",
+    "http://localhost:5500",
+    "http://localhost:8000",
     "null",
 ]
 
-# Add Railway domain to CORS in production
 if ENVIRONMENT == "production":
-    # Add your Railway domain here when you get it
     CORS_ORIGINS.extend([
-        "https://testproject-production-b850.up.railway.app/",
+        "https://testproject-production-b850.up.railway.app",  
     ])
 
 app = FastAPI(
     title="PDF RAG API",
     description="A FastAPI application for PDF upload, text extraction, and semantic search with RAG capabilities",
     version="1.0.0",
-    docs_url="/docs" if ENVIRONMENT != "production" else None,
-    redoc_url="/redoc" if ENVIRONMENT != "production" else None
+    docs_url="/docs", 
+    redoc_url="/redoc"
 )
 
 app.add_middleware(
@@ -88,22 +88,25 @@ async def global_exception_handler(request: Request, exc: Exception):
 app.include_router(pdf_router, prefix="/api/v1", tags=["PDF Operations"])
 app.include_router(search_router, prefix="/api/v1", tags=["Search & Embeddings"])
 
-frontend_dir = Path("frontend")
-if frontend_dir.exists():
-    app.mount("/static", StaticFiles(directory=frontend_dir), name="static")
-
 @app.on_event("startup")
 async def startup_event():
     logger.info("Starting PDF RAG API...")
     logger.info(f"Environment: {ENVIRONMENT}")
-    logger.info(f"CORS Origins: {CORS_ORIGINS[:3]}... (+{len(CORS_ORIGINS)-3} more)")
+    logger.info(f"CORS Origins: {CORS_ORIGINS}")
     
-    # Create required directories
     for dir_path in ["uploads", "data", "models"]:
         Path(dir_path).mkdir(exist_ok=True)
         logger.info(f"Directory {dir_path}: ✓")
     
-    # Don't let embedding service errors block startup
+    frontend_path = Path("frontend")
+    frontend_index = Path("frontend/index.html")
+    logger.info(f"Frontend directory exists: {frontend_path.exists()}")
+    logger.info(f"Frontend index.html exists: {frontend_index.exists()}")
+    
+    if frontend_path.exists():
+        files = list(frontend_path.iterdir())
+        logger.info(f"Frontend files: {[f.name for f in files]}")
+    
     try:
         from app.services.embedding_service import embedding_service
         if embedding_service and hasattr(embedding_service, 'health_check'):
@@ -113,24 +116,19 @@ async def startup_event():
             logger.info("Embedding service available but no health_check method")
     except Exception as e:
         logger.warning(f"Embedding service not fully available: {str(e)}")
-        # Don't fail startup - just log the issue
 
 @app.on_event("shutdown")
 async def shutdown_event():
     logger.info("Shutting down PDF RAG API...")
 
-@app.get("/")
-async def root():
-    frontend_file = Path("frontend/index.html")
-    if frontend_file.exists():
-        return FileResponse(frontend_file)
-    
+@app.get("/api/status")
+async def api_status():
     return {
         "message": "PDF RAG API",
         "version": "1.0.0",
         "environment": ENVIRONMENT,
         "status": "running",
-        "docs": "/docs" if ENVIRONMENT != "production" else "disabled",
+        "docs": "/docs",
         "endpoints": {
             "health": "/health",
             "upload": "/api/v1/upload",
@@ -151,7 +149,6 @@ async def health_check():
         "uptime": "unknown"
     }
     
-    # Don't fail health check due to embedding service issues
     try:
         from app.services.embedding_service import embedding_service
         if embedding_service and hasattr(embedding_service, 'health_check'):
@@ -168,7 +165,6 @@ async def health_check():
         "frontend_dir": Path("frontend").exists()
     }
     
-    # Always return 200 OK - don't use 503 status
     return health_info
 
 @app.get("/debug/cors")
@@ -180,15 +176,49 @@ async def debug_cors():
         "note": "This endpoint helps debug CORS issues"
     }
 
+frontend_dir = Path("frontend")
+if frontend_dir.exists():
+    app.mount("/static", StaticFiles(directory=frontend_dir), name="static")
+    logger.info("Frontend static files mounted at /static")
+
+@app.get("/")
+async def root():
+    frontend_file = Path("frontend/index.html")
+    if frontend_file.exists():
+        logger.info("Serving frontend index.html from root")
+        return FileResponse(frontend_file)
+    else:
+        logger.warning("Frontend index.html not found, serving API info")
+        return {
+            "message": "PDF RAG API",
+            "version": "1.0.0",
+            "environment": ENVIRONMENT,
+            "status": "running",
+            "frontend": "not_found",
+            "docs": "/docs",
+            "api_status": "/api/status"
+        }
+
 @app.get("/{full_path:path}")
 async def serve_frontend(full_path: str):
+    if (full_path.startswith("api/") or 
+        full_path.startswith("docs") or 
+        full_path.startswith("redoc") or
+        full_path == "health" or
+        full_path.startswith("static/")):
+        return JSONResponse(
+            status_code=404,
+            content={"detail": "Endpoint not found", "path": full_path}
+        )
+    
     frontend_file = Path("frontend/index.html")
-    if frontend_file.exists() and not full_path.startswith("api/"):
+    if frontend_file.exists():
+        logger.info(f"Serving frontend for path: {full_path}")
         return FileResponse(frontend_file)
     
     return JSONResponse(
         status_code=404,
-        content={"detail": "Not found", "path": full_path}
+        content={"detail": "Page not found", "path": full_path, "frontend": "not_available"}
     )
 
 if __name__ == "__main__":
