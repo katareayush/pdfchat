@@ -13,11 +13,9 @@ COPY requirements.txt .
 RUN pip install --upgrade pip && \
     pip install -r requirements.txt --no-cache-dir
 
-# Fix the copy paths - this is the key change
 COPY app/ ./app/
 COPY display/ ./display/
 
-# Debug to verify
 RUN echo "=== Files in /app ===" && ls -la
 RUN echo "=== Frontend check ===" && ls -la frontend/ || echo "No frontend dir"
 
