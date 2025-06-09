@@ -332,19 +332,6 @@
             font-size: 14px;
         }
 
-        .contextual {
-            background: linear-gradient(135deg, #059669, #10b981);
-            border-color: #34d399;
-        }
-
-        .contextual .llm-answer-title {
-            color: #d1fae5;
-        }
-
-        .contextual .llm-answer-content {
-            color: #ecfdf5;
-        }
-
         .not-available {
             background: linear-gradient(135deg, #7f1d1d, #991b1b);
             border-color: #dc2626;
@@ -451,18 +438,6 @@
             border-top: 1px solid #3b82f6;
             border-radius: 50%;
             animation: spin 1s linear infinite;
-        }
-
-        /* Debug info styles */
-        .debug-info {
-            background: #1f2937;
-            border: 1px solid #4b5563;
-            border-radius: 8px;
-            padding: 12px;
-            margin-top: 16px;
-            font-family: monospace;
-            font-size: 12px;
-            color: #9ca3af;
         }
 
         @keyframes spin {
@@ -599,6 +574,9 @@
             });
         }
 
+
+
+
         function handleKeyDown(e) {
             if (e.key === 'Enter' && !e.shiftKey) {
                 e.preventDefault();
@@ -714,7 +692,7 @@
                         }
                     } else {
                         const count = status.embedding_count || 0;
-                        elements.embeddingStatus.innerHTML = `⏳ Processing embeddings...`;
+                        elements.embeddingStatus.innerHTML = `⏳ Processing embeddings... (${count} processed)`;
                     }
                 }
             } catch (error) {
@@ -848,12 +826,7 @@
                 }
 
                 const enhancedResult = await response.json();
-                
-                // Debug logging - check what we actually receive
                 console.log('Enhanced search result:', enhancedResult);
-                console.log('Contextual answer:', enhancedResult.contextual_answer);
-                console.log('Answer type:', enhancedResult.answer_type);
-                console.log('Can answer:', enhancedResult.can_answer);
 
                 let responseContent = '';
 
@@ -867,29 +840,11 @@
                     `;
                 }
 
-                // Try multiple possible field names for the contextual answer
-                const contextualAnswer = enhancedResult.contextual_answer || 
-                                       enhancedResult.llm_answer || 
-                                       enhancedResult.ai_analysis ||
-                                       enhancedResult.enhanced_answer;
-
-                if (contextualAnswer && contextualAnswer.trim()) {
-                    console.log('Found contextual answer:', contextualAnswer);
+                if (enhancedResult.contextual_answer) {
                     const llmHTML = createLLMAnswerHTML(enhancedResult);
                     if (llmHTML) {
                         responseContent += llmHTML;
                     }
-                } else {
-                    console.log('No contextual answer found in response');
-                    // Add debug info to see full response structure
-                    responseContent += `
-                        <div class="debug-info">
-                            <strong>Debug Info:</strong><br>
-                            Available fields: ${Object.keys(enhancedResult).join(', ')}<br>
-                            Anthropic enabled: ${enhancedResult.anthropic_enabled || 'unknown'}<br>
-                            LLM Analysis status: ${enhancedResult.llm_analysis?.status || 'unknown'}
-                        </div>
-                    `;
                 }
 
                 addMessage(responseContent, false);
@@ -907,59 +862,22 @@
         function createLLMAnswerHTML(enhancedResult) {
             console.log('Creating LLM Answer HTML with:', enhancedResult);
 
-            const contextualAnswer = enhancedResult.contextual_answer || 
-                                    enhancedResult.llm_answer || 
-                                    enhancedResult.ai_analysis ||
-                                    enhancedResult.enhanced_answer;
-
-            if (!contextualAnswer || !contextualAnswer.trim()) {
+            if (!enhancedResult || !enhancedResult.contextual_answer) {
                 console.log('No contextual answer found');
                 return '';
             }
 
+            const contextualAnswer = enhancedResult.contextual_answer;
             const answerType = enhancedResult.answer_type || 'basic';
-            const canAnswer = enhancedResult.can_answer;
-            const relevance = enhancedResult.relevance || 'unknown';
-            const confidence = enhancedResult.confidence_score || 0;
 
-            console.log('Answer type:', answerType, 'Can answer:', canAnswer, 'Relevance:', relevance, 'Confidence:', confidence);
+            const isNotAvailable = answerType === 'not_available' ||
+                contextualAnswer.toLowerCase().includes('not available') ||
+                contextualAnswer.toLowerCase().includes('this information is not available') ||
+                contextualAnswer.toLowerCase().includes('does not contain information');
 
-            let cssClass = 'llm-answer';
-            let icon = '🤖';
-            let title = 'AI Analysis';
-
-            // Check the actual content to determine if information was found
-            const answerLower = contextualAnswer.toLowerCase();
-            const hasNegativeIndicators = 
-                answerLower.includes('does not contain') ||
-                answerLower.includes('not available') ||
-                answerLower.includes('cannot find') ||
-                answerLower.includes('no information') ||
-                answerLower.includes('unable to find');
-
-            const hasPositiveIndicators = 
-                answerLower.includes('according to') ||
-                answerLower.includes('clause') ||
-                answerLower.includes('section') ||
-                answerLower.includes('page') ||
-                answerLower.includes('document states') ||
-                answerLower.includes('specifies') ||
-                answerLower.includes('direct answer');
-
-            // Determine styling based on content analysis
-            if (hasNegativeIndicators && !hasPositiveIndicators) {
-                cssClass += ' not-available';
-                icon = '❌';
-                title = 'Information Not Available';
-            } else if (hasPositiveIndicators || relevance === 'relevant' || confidence > 0.6) {
-                cssClass += ' contextual';
-                icon = '✅';
-                title = 'Found Information';
-            } else {
-                cssClass += ' contextual';
-                icon = '💡';
-                title = 'AI Analysis';
-            }
+            const cssClass = isNotAvailable ? 'llm-answer not-available' : 'llm-answer';
+            const icon = isNotAvailable ? '❌' : '🤖';
+            const title = isNotAvailable ? 'Information Not Available' : 'AI Analysis';
 
             return `
                 <div class="${cssClass}">
@@ -984,27 +902,31 @@
                 `;
             }
 
-            const searchTime = results.search_time_ms ? results.search_time_ms.toFixed(1) : '0.0';
-            
-            // Show all results from backend (they are already filtered)
-            const relevantResults = results.results.slice(0, 5);
+
+            const searchTime = results.faiss_time_ms || results.search_time_ms || 0;
+            const uniqueResults = results.results.slice(0, 6);
 
             let html = `
                 <div class="search-results">
                     <div class="result-header">
                         <div>
-                            <h4>Found ${relevantResults.length} relevant result${relevantResults.length !== 1 ? 's' : ''}</h4>
-                            <p>Search completed in ${searchTime}ms</p>
+                            <h4>Found ${uniqueResults.length} relevant page${uniqueResults.length !== 1 ? 's' : ''}</h4>
+                            <p>Search completed in ${searchTime.toFixed(1)}ms</p>
                         </div>
                     </div>
             `;
 
-            relevantResults.forEach((result, index) => {
+            uniqueResults.forEach((result, index) => {
                 let displayText = result.context || '';
-                
-                // Show content as-is from backend (already optimized)
-                if (displayText.length > 1500) {
-                    displayText = displayText.substring(0, 1500) + '...';
+
+                if (displayText.length > 800) {
+                    const truncated = displayText.substring(0, 800);
+                    const lastSentence = truncated.lastIndexOf('.');
+                    if (lastSentence > 400) {
+                        displayText = truncated.substring(0, lastSentence + 1);
+                    } else {
+                        displayText = truncated + '...';
+                    }
                 }
 
                 html += `
@@ -1021,36 +943,6 @@
 
             html += '</div>';
             return html;
-        }
-
-        function isQueryRelevant(context, query) {
-            const contextLower = context.toLowerCase();
-            const queryLower = query.toLowerCase();
-            
-            // Extract key terms from query
-            const keyTerms = queryLower.split(/\s+/).filter(term => 
-                term.length > 2 && !['what', 'is', 'are', 'the', 'according', 'to', 'clause', 'section'].includes(term)
-            );
-            
-            // Check if context contains multiple key terms
-            const matches = keyTerms.filter(term => contextLower.includes(term));
-            return matches.length >= Math.min(2, keyTerms.length);
-        }
-
-        function highlightQueryTerms(text, query) {
-            // Extract meaningful terms from query
-            const terms = query.toLowerCase().split(/\s+/).filter(term => 
-                term.length > 2 && !['what', 'is', 'are', 'the', 'according', 'to', 'about'].includes(term)
-            );
-            
-            let highlightedText = text;
-            
-            terms.forEach(term => {
-                const regex = new RegExp(`\\b(${escapeRegex(term)})\\b`, 'gi');
-                highlightedText = highlightedText.replace(regex, '<mark style="background: #fbbf24; color: #000;">$1</mark>');
-            });
-            
-            return highlightedText;
         }
 
         function escapeRegex(string) {

@@ -8,6 +8,7 @@ from datetime import datetime
 import logging
 import os
 import re
+import time
 
 logger = logging.getLogger(__name__)
 
@@ -47,6 +48,7 @@ class EmbeddingService:
     
     def _initialize_anthropic(self):
         if not ANTHROPIC_AVAILABLE or not self.anthropic_api_key:
+            logger.warning("Anthropic API key not found or module not available")
             return
         
         try:
@@ -60,13 +62,14 @@ class EmbeddingService:
             
             if test_response and test_response.content:
                 self.anthropic_enabled = True
-                logger.info("Anthropic API initialized successfully")
+                logger.info("Anthropic API initialized successfully with Haiku")
                 
         except Exception as e:
             logger.error(f"Error initializing Anthropic: {str(e)}")
             self.anthropic_enabled = False
     
-    def _call_anthropic(self, prompt: str, max_tokens: int = 1000, model: str = "claude-3-5-sonnet-20241022") -> str:
+    def _call_anthropic(self, prompt: str, max_tokens: int = 800, model: str = "claude-3-haiku-20240307") -> str:
+        """Use Haiku for fast responses"""
         if not self.anthropic_enabled:
             return ""
         
@@ -203,7 +206,7 @@ class EmbeddingService:
             if query_embedding.size == 0:
                 return []
             
-            search_k = min(top_k * 2, self.index.ntotal)
+            search_k = min(top_k * 4, self.index.ntotal) if doc_id else min(top_k * 2, self.index.ntotal)
             scores, indices = self.index.search(query_embedding.astype('float32'), search_k)
             
             results = []
@@ -226,15 +229,18 @@ class EmbeddingService:
                         "score": float(score),
                         "char_count": metadata.get("char_count", 0)
                     })
+                    
+                    if len(results) >= top_k:
+                        break
             
-            results.sort(key=lambda x: x['score'], reverse=True)
-            return results[:top_k]
+            return results
             
         except Exception as e:
             logger.error(f"Error in basic search: {str(e)}")
             return []
     
     def analyze_query_context(self, query: str, search_results: List[Dict]) -> Dict:
+        """Analyze query context with Claude Haiku for speed"""
         if not self.anthropic_enabled or not search_results:
             return {
                 "can_answer": len(search_results) > 0,
@@ -247,8 +253,11 @@ class EmbeddingService:
         try:
             combined_context = "\n\n".join([
                 f"Page {result['page']}:\n{result['context']}"
-                for result in search_results[:5]
+                for result in search_results[:8]
             ])
+            
+            if len(combined_context) > 4000:
+                combined_context = combined_context[:4000] + "..."
             
             relevance_prompt = f"""Analyze if the provided document content contains information that can answer the user's question.
 
@@ -272,7 +281,7 @@ Response:"""
                     "can_answer": False,
                     "confidence": 0.1,
                     "relevance": "not_relevant",
-                    "contextual_answer": "The document does not contain information about this topic.",
+                    "contextual_answer": "This information is not available in the document.",
                     "answer_type": "not_available"
                 }
             
@@ -316,6 +325,7 @@ Answer:"""
             }
     
     def _calculate_confidence(self, relevance: str, answer: str, search_results: list) -> float:
+        """Calculate confidence score"""
         confidence = 0.0
         
         if relevance == "RELEVANT":
@@ -339,6 +349,7 @@ Answer:"""
         return min(1.0, confidence)
     
     def _determine_answer_type(self, answer: str, relevance: str) -> str:
+        """Determine answer type"""
         if relevance == "NOT_RELEVANT":
             return "not_available"
         elif relevance == "PARTIAL":
@@ -349,9 +360,13 @@ Answer:"""
             return "basic"
     
     def search_with_context_analysis(self, query: str, top_k: int = 5, doc_id: str = None) -> Dict:
+        """Main search method with context analysis and performance tracking"""
         try:
+            start_time = time.time()
+            
             specific_clause = self._extract_clause_number(query)
             
+            faiss_start = time.time()
             if specific_clause:
                 clause_results = self._search_specific_clause(specific_clause, doc_id)
                 if clause_results:
@@ -360,14 +375,21 @@ Answer:"""
                     search_results = self._basic_search(query, top_k, 0.25, doc_id)
             else:
                 search_results = self._basic_search(query, top_k, 0.25, doc_id)
+            faiss_time = (time.time() - faiss_start) * 1000
             
+            claude_start = time.time()
             context_analysis = self.analyze_query_context(query, search_results)
+            claude_time = (time.time() - claude_start) * 1000
+            
+            total_time = (time.time() - start_time) * 1000
             
             return {
                 "query": query,
                 "results": search_results,
                 "total_found": len(search_results),
-                "search_time_ms": 0.0,
+                "faiss_time_ms": round(faiss_time, 1),
+                "claude_time_ms": round(claude_time, 1),
+                "total_time_ms": round(total_time, 1),
                 "llm_analysis": {
                     "status": "completed" if self.anthropic_enabled else "unavailable",
                     "relevance_check": context_analysis.get("relevance", "unknown"),
@@ -397,6 +419,7 @@ Answer:"""
             }
     
     def _extract_clause_number(self, query: str) -> str:
+        """Extract clause numbers from query"""
         patterns = [
             r'(?:clause|section|paragraph|item|article|part|chapter)\s*(\d+(?:\.\d+)*)',
             r'(\d+\.\d+(?:\.\d+)*)',
@@ -411,6 +434,7 @@ Answer:"""
         return ""
     
     def _search_specific_clause(self, clause_number: str, doc_id: str = None) -> List[Dict]:
+        """Search for specific clauses"""
         try:
             clause_results = []
             
@@ -437,6 +461,7 @@ Answer:"""
             return []
     
     def _quick_clause_check(self, content: str, clause_number: str) -> bool:
+        """Quick clause validation"""
         content_lower = content.lower()
         number_lower = clause_number.lower()
         
@@ -457,71 +482,11 @@ Answer:"""
                 logger.warning("Index is empty - no documents have been indexed yet")
                 return []
             
-            if use_claude_enhancement and self.anthropic_enabled:
-                return self._enhanced_search_with_claude(query, top_k, score_threshold, doc_id)
-            else:
-                return self._basic_search(query, top_k, score_threshold, doc_id)
+            return self._basic_search(query, top_k, score_threshold, doc_id)
             
         except Exception as e:
             logger.error(f"Error in search: {str(e)}")
             return self._basic_search(query, top_k, score_threshold, doc_id)
-    
-    def _enhanced_search_with_claude(self, query: str, top_k: int, score_threshold: float, doc_id: str = None) -> List[Dict]:
-        try:
-            basic_results = self._basic_search(query, top_k * 2, score_threshold, doc_id)
-            
-            if not basic_results:
-                return basic_results
-            
-            enhanced_queries = self._generate_query_variations(query)
-            all_results = {}
-            
-            for search_query in enhanced_queries[:3]:
-                query_results = self._basic_search(search_query, top_k, score_threshold, doc_id)
-                
-                for result in query_results:
-                    key = f"{result['doc_id']}_{result['page']}"
-                    if key not in all_results or all_results[key]['score'] < result['score']:
-                        all_results[key] = result
-            
-            final_results = sorted(all_results.values(), key=lambda x: x['score'], reverse=True)
-            return final_results[:top_k]
-            
-        except Exception as e:
-            logger.error(f"Error in enhanced search: {str(e)}")
-            return self._basic_search(query, top_k, score_threshold, doc_id)
-    
-    def _generate_query_variations(self, query: str) -> List[str]:
-        if not self.anthropic_enabled:
-            return [query]
-        
-        try:
-            prompt = f"""Generate 2 alternative search queries for: "{query}"
-
-Make them:
-1. Use synonyms and related terms
-2. More specific or more general version
-
-Return only the alternative queries, one per line (no numbering):"""
-            
-            response = self._call_anthropic(prompt, max_tokens=150)
-            variations = [query]
-            
-            if response:
-                lines = response.strip().split('\n')
-                for line in lines:
-                    line = line.strip()
-                    line = re.sub(r'^\d+\.?\s*', '', line)
-                    line = line.strip('"-')
-                    
-                    if line and line != query and len(line) > 3:
-                        variations.append(line)
-            
-            return variations[:3]
-            
-        except Exception as e:
-            logger.error(f"Error generating query variations: {e}")
-            return [query]
     
     def remove_document_embeddings(self, doc_id: str) -> int:
         try:
@@ -672,7 +637,7 @@ Return only the alternative queries, one per line (no numbering):"""
 
 try:
     embedding_service = EmbeddingService()
-    logger.info("Embedding service created successfully")
+    logger.info("Embedding service created successfully with Claude Haiku for speed")
 except Exception as e:
     logger.error(f"Failed to create embedding service: {str(e)}")
     embedding_service = None
