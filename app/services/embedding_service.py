@@ -12,11 +12,10 @@ import re
 logger = logging.getLogger(__name__)
 
 try:
-    import google.generativeai as genai
-    GEMINI_AVAILABLE = True
+    import anthropic
+    ANTHROPIC_AVAILABLE = True
 except ImportError:
-    GEMINI_AVAILABLE = False
-    logger.info("Gemini not available - install google-generativeai for enhanced features")
+    ANTHROPIC_AVAILABLE = False
 
 class EmbeddingService:
     def __init__(self, model_name: str = "all-MiniLM-L6-v2"):
@@ -28,58 +27,63 @@ class EmbeddingService:
         self.next_embedding_id = 0
         self.model_loaded = False
         
-        self.gemini_api_key = os.getenv("GEMINI_API_KEY")
-        self.gemini_model = None
-        self.gemini_enabled = False
+        self.anthropic_api_key = os.getenv("ANTHROPIC_API_KEY")
+        self.anthropic_client = None
+        self.anthropic_enabled = False
         
         self.storage_dir = Path("data")
         self.storage_dir.mkdir(exist_ok=True)
         self.index_path = self.storage_dir / "faiss_index.bin"
         self.metadata_path = self.storage_dir / "chunk_metadata.json"
         
-        self._initialize_lazy()
-        self._initialize_gemini()
+        self._initialize()
     
-    def _initialize_lazy(self):
+    def _initialize(self):
         try:
             self._load_index()
+            self._initialize_anthropic()
         except Exception as e:
             logger.error(f"Error initializing embedding service: {str(e)}")
     
-    def _initialize_gemini(self):
-        if not GEMINI_AVAILABLE or not self.gemini_api_key:
-            logger.info("Gemini API key not found or module not available")
+    def _initialize_anthropic(self):
+        if not ANTHROPIC_AVAILABLE or not self.anthropic_api_key:
             return
         
         try:
-            genai.configure(api_key=self.gemini_api_key)
+            self.anthropic_client = anthropic.Anthropic(api_key=self.anthropic_api_key)
             
-            model_names = [
-                'gemini-1.5-flash',
-                'gemini-1.5-pro',
-                'gemini-pro',
-                'models/gemini-1.5-flash',
-                'models/gemini-1.5-pro'
-            ]
+            test_response = self.anthropic_client.messages.create(
+                model="claude-3-haiku-20240307",
+                max_tokens=10,
+                messages=[{"role": "user", "content": "Test"}]
+            )
             
-            for model_name in model_names:
-                try:
-                    self.gemini_model = genai.GenerativeModel(model_name)
-                    test_response = self.gemini_model.generate_content("Hello")
-                    if test_response and test_response.text:
-                        self.gemini_enabled = True
-                        logger.info(f"Gemini API initialized successfully with model: {model_name}")
-                        break
-                except Exception as model_error:
-                    logger.warning(f"Failed to initialize Gemini model {model_name}: {str(model_error)}")
-                    continue
-            
-            if not self.gemini_enabled:
-                logger.error("Failed to initialize any Gemini model")
+            if test_response and test_response.content:
+                self.anthropic_enabled = True
+                logger.info("Anthropic API initialized successfully")
                 
         except Exception as e:
-            logger.error(f"Error initializing Gemini: {str(e)}")
-            self.gemini_enabled = False
+            logger.error(f"Error initializing Anthropic: {str(e)}")
+            self.anthropic_enabled = False
+    
+    def _call_anthropic(self, prompt: str, max_tokens: int = 1000, model: str = "claude-3-5-sonnet-20241022") -> str:
+        if not self.anthropic_enabled:
+            return ""
+        
+        try:
+            response = self.anthropic_client.messages.create(
+                model=model,
+                max_tokens=max_tokens,
+                messages=[{"role": "user", "content": prompt}]
+            )
+            
+            if response and response.content and len(response.content) > 0:
+                return response.content[0].text.strip()
+            return ""
+                
+        except Exception as e:
+            logger.error(f"Error calling Anthropic API: {str(e)}")
+            return ""
     
     def _ensure_model_loaded(self):
         if not self.model_loaded:
@@ -168,7 +172,7 @@ class EmbeddingService:
                 self.chunk_metadata[str(embedding_id)] = {
                     "doc_id": doc_id,
                     "page_number": page['page_number'],
-                    "text_chunk": page['text_chunk'][:1000],
+                    "text_chunk": page['text_chunk'],
                     "char_count": page.get('char_count', len(page['text_chunk'])),
                     "added_at": datetime.now().isoformat()
                 }
@@ -199,10 +203,11 @@ class EmbeddingService:
             if query_embedding.size == 0:
                 return []
             
-            search_k = min(top_k * 4, self.index.ntotal) if doc_id else min(top_k * 2, self.index.ntotal)
+            search_k = min(top_k * 2, self.index.ntotal)
             scores, indices = self.index.search(query_embedding.astype('float32'), search_k)
             
             results = []
+            
             for score, idx in zip(scores[0], indices[0]):
                 if idx == -1 or score < score_threshold:
                     continue
@@ -221,18 +226,16 @@ class EmbeddingService:
                         "score": float(score),
                         "char_count": metadata.get("char_count", 0)
                     })
-                    
-                    if len(results) >= top_k:
-                        break
             
-            return results
+            results.sort(key=lambda x: x['score'], reverse=True)
+            return results[:top_k]
             
         except Exception as e:
             logger.error(f"Error in basic search: {str(e)}")
             return []
     
     def analyze_query_context(self, query: str, search_results: List[Dict]) -> Dict:
-        if not self.gemini_enabled or not search_results:
+        if not self.anthropic_enabled or not search_results:
             return {
                 "can_answer": len(search_results) > 0,
                 "confidence": 0.5 if search_results else 0.0,
@@ -243,61 +246,56 @@ class EmbeddingService:
         
         try:
             combined_context = "\n\n".join([
-                f"Page {result['page']}: {result['context'][:300]}"
+                f"Page {result['page']}:\n{result['context']}"
                 for result in search_results[:5]
             ])
             
-            relevance_prompt = f"""
-            Analyze if the provided document content can answer the user's question.
+            relevance_prompt = f"""Analyze if the provided document content contains information that can answer the user's question.
+
+Question: "{query}"
+
+Document Content:
+{combined_context}
+
+Respond with:
+- "RELEVANT" if the content directly answers the question
+- "PARTIAL" if the content has some related information
+- "NOT_RELEVANT" if the content has no meaningful connection
+
+Response:"""
             
-            Question: "{query}"
-            
-            Document Content:
-            {combined_context[:1200]}
-            
-            Respond with only:
-            - "RELEVANT" if the content contains information that can answer the question
-            - "NOT_RELEVANT" if the content does not contain relevant information  
-            - "PARTIAL" if the content has some related information but cannot fully answer
-            
-            Response:"""
-            
-            relevance_response = self.gemini_model.generate_content(relevance_prompt)
-            relevance = relevance_response.text.strip().upper() if relevance_response.text else "NOT_RELEVANT"
-            
-            logger.info(f"Relevance check for query '{query}': {relevance}")
+            relevance = self._call_anthropic(relevance_prompt, max_tokens=20)
+            relevance = relevance.upper() if relevance else "NOT_RELEVANT"
             
             if relevance == "NOT_RELEVANT":
                 return {
                     "can_answer": False,
                     "confidence": 0.1,
                     "relevance": "not_relevant",
-                    "contextual_answer": "This information is not available in the document.",
+                    "contextual_answer": "The document does not contain information about this topic.",
                     "answer_type": "not_available"
                 }
             
-            answer_prompt = f"""
-            Based on the document content provided, answer the user's question accurately and concisely.
+            answer_prompt = f"""Based on the document content provided, answer the user's question using only the information explicitly present.
+
+Question: "{query}"
+
+Document Content:
+{combined_context}
+
+Instructions:
+1. Use ONLY information explicitly stated in the document
+2. Quote exact text when possible
+3. Include specific page numbers when referencing information
+4. If information is incomplete, state what IS available and what is missing
+5. Be thorough and accurate
+
+Answer:"""
             
-            Question: "{query}"
+            contextual_answer = self._call_anthropic(answer_prompt, max_tokens=800)
             
-            Document Content:
-            {combined_context[:1500]}
-            
-            Guidelines:
-            1. Only use information explicitly mentioned in the document
-            2. If you cannot find a complete answer, say "The document provides partial information about this topic"
-            3. Be specific and cite page numbers when possible
-            4. Keep the answer under 200 words
-            5. If the information is unclear or contradictory, mention that
-            
-            Answer:"""
-            
-            answer_response = self.gemini_model.generate_content(answer_prompt)
-            contextual_answer = answer_response.text.strip() if answer_response.text else ""
-            
-            confidence = self._calculate_answer_confidence(relevance, contextual_answer, search_results)
-            answer_type = self._determine_answer_type(contextual_answer, relevance, confidence)
+            confidence = self._calculate_confidence(relevance, contextual_answer, search_results)
+            answer_type = self._determine_answer_type(contextual_answer, relevance)
             
             return {
                 "can_answer": relevance in ["RELEVANT", "PARTIAL"],
@@ -313,57 +311,55 @@ class EmbeddingService:
                 "can_answer": False,
                 "confidence": 0.0,
                 "relevance": "error",
-                "contextual_answer": "Unable to analyze the document content at this time.",
+                "contextual_answer": "Unable to analyze the document content.",
                 "answer_type": "error"
             }
     
-    def _calculate_answer_confidence(self, relevance: str, answer: str, search_results: list) -> float:
+    def _calculate_confidence(self, relevance: str, answer: str, search_results: list) -> float:
         confidence = 0.0
         
         if relevance == "RELEVANT":
-            confidence += 0.6
+            confidence += 0.8
         elif relevance == "PARTIAL":
-            confidence += 0.3
+            confidence += 0.5
         else:
-            confidence += 0.1
+            confidence += 0.2
         
         if search_results:
             avg_score = sum(r.get('score', 0) for r in search_results[:3]) / min(3, len(search_results))
-            confidence += min(0.3, avg_score * 0.5)
+            confidence += min(0.2, avg_score * 0.4)
         
-        vague_indicators = [
-            "partial information", "not entirely clear", "may be", "possibly",
-            "unable to determine", "not specified", "unclear"
-        ]
-        
-        if any(indicator in answer.lower() for indicator in vague_indicators):
+        uncertainty_indicators = ["not clear", "unclear", "may be", "possibly", "unable to determine"]
+        if any(indicator in answer.lower() for indicator in uncertainty_indicators):
             confidence *= 0.7
         
-        if "page" in answer.lower() and any(char.isdigit() for char in answer):
+        if any(word in answer.lower() for word in ["page", "clause", "section"]) and any(char.isdigit() for char in answer):
             confidence += 0.1
         
         return min(1.0, confidence)
     
-    def _determine_answer_type(self, answer: str, relevance: str, confidence: float) -> str:
-        answer_lower = answer.lower()
-        
-        if confidence < 0.3 or relevance == "NOT_RELEVANT":
+    def _determine_answer_type(self, answer: str, relevance: str) -> str:
+        if relevance == "NOT_RELEVANT":
             return "not_available"
-        elif "partial information" in answer_lower or relevance == "PARTIAL":
+        elif relevance == "PARTIAL":
             return "partial"
-        elif confidence > 0.7:
+        elif relevance == "RELEVANT":
             return "comprehensive"
         else:
             return "basic"
     
     def search_with_context_analysis(self, query: str, top_k: int = 5, doc_id: str = None) -> Dict:
         try:
-            search_results = self._basic_search(
-                query=query,
-                top_k=top_k,
-                score_threshold=0.25,
-                doc_id=doc_id
-            )
+            specific_clause = self._extract_clause_number(query)
+            
+            if specific_clause:
+                clause_results = self._search_specific_clause(specific_clause, doc_id)
+                if clause_results:
+                    search_results = clause_results[:top_k]
+                else:
+                    search_results = self._basic_search(query, top_k, 0.25, doc_id)
+            else:
+                search_results = self._basic_search(query, top_k, 0.25, doc_id)
             
             context_analysis = self.analyze_query_context(query, search_results)
             
@@ -371,15 +367,18 @@ class EmbeddingService:
                 "query": query,
                 "results": search_results,
                 "total_found": len(search_results),
+                "search_time_ms": 0.0,
                 "llm_analysis": {
-                    "status": "completed" if self.gemini_enabled else "unavailable",
-                    "relevance_check": context_analysis.get("relevance", "unknown")
+                    "status": "completed" if self.anthropic_enabled else "unavailable",
+                    "relevance_check": context_analysis.get("relevance", "unknown"),
+                    "anthropic_initialized": self.anthropic_enabled
                 },
-                "contextual_answer": context_analysis.get("contextual_answer"),
+                "contextual_answer": context_analysis.get("contextual_answer", ""),
                 "confidence_score": context_analysis.get("confidence", 0.0),
                 "answer_type": context_analysis.get("answer_type", "basic"),
                 "can_answer": context_analysis.get("can_answer", False),
-                "gemini_enabled": self.gemini_enabled
+                "anthropic_enabled": self.anthropic_enabled,
+                "relevance": context_analysis.get("relevance", "unknown")
             }
             
         except Exception as e:
@@ -394,11 +393,62 @@ class EmbeddingService:
                 "confidence_score": 0.0,
                 "answer_type": "error",
                 "can_answer": len(search_results) > 0,
-                "gemini_enabled": False
+                "anthropic_enabled": False
             }
     
+    def _extract_clause_number(self, query: str) -> str:
+        patterns = [
+            r'(?:clause|section|paragraph|item|article|part|chapter)\s*(\d+(?:\.\d+)*)',
+            r'(\d+\.\d+(?:\.\d+)*)',
+            r'(?:^|\s)(\d{1,3})\s+(?:[A-Za-z]|$)',
+        ]
+        
+        for pattern in patterns:
+            match = re.search(pattern, query.lower())
+            if match:
+                return match.group(1)
+        
+        return ""
+    
+    def _search_specific_clause(self, clause_number: str, doc_id: str = None) -> List[Dict]:
+        try:
+            clause_results = []
+            
+            for embedding_id, metadata in self.chunk_metadata.items():
+                if doc_id and metadata.get("doc_id") != doc_id:
+                    continue
+                
+                content = metadata.get("text_chunk", "")
+                
+                if clause_number in content and self._quick_clause_check(content, clause_number):
+                    clause_results.append({
+                        "page": metadata["page_number"],
+                        "context": content,
+                        "doc_id": metadata["doc_id"],
+                        "score": 0.95,
+                        "char_count": len(content)
+                    })
+            
+            clause_results.sort(key=lambda x: x['page'])
+            return clause_results[:5]
+            
+        except Exception as e:
+            logger.error(f"Error in clause search: {str(e)}")
+            return []
+    
+    def _quick_clause_check(self, content: str, clause_number: str) -> bool:
+        content_lower = content.lower()
+        number_lower = clause_number.lower()
+        
+        return (
+            f"{number_lower} " in content_lower or
+            f"clause {number_lower}" in content_lower or
+            f"section {number_lower}" in content_lower or
+            content_lower.startswith(number_lower + " ")
+        )
+    
     def search_similar(self, query: str, top_k: int = 5, score_threshold: float = 0.3, 
-                      doc_id: str = None, use_gemini_enhancement: bool = True) -> List[Dict]:
+                      doc_id: str = None, use_claude_enhancement: bool = True) -> List[Dict]:
         try:
             if not self.model_loaded:
                 self._ensure_model_loaded()
@@ -407,8 +457,8 @@ class EmbeddingService:
                 logger.warning("Index is empty - no documents have been indexed yet")
                 return []
             
-            if use_gemini_enhancement and self.gemini_enabled:
-                return self._enhanced_search_with_gemini(query, top_k, score_threshold, doc_id)
+            if use_claude_enhancement and self.anthropic_enabled:
+                return self._enhanced_search_with_claude(query, top_k, score_threshold, doc_id)
             else:
                 return self._basic_search(query, top_k, score_threshold, doc_id)
             
@@ -416,7 +466,7 @@ class EmbeddingService:
             logger.error(f"Error in search: {str(e)}")
             return self._basic_search(query, top_k, score_threshold, doc_id)
     
-    def _enhanced_search_with_gemini(self, query: str, top_k: int, score_threshold: float, doc_id: str = None) -> List[Dict]:
+    def _enhanced_search_with_claude(self, query: str, top_k: int, score_threshold: float, doc_id: str = None) -> List[Dict]:
         try:
             basic_results = self._basic_search(query, top_k * 2, score_threshold, doc_id)
             
@@ -442,25 +492,23 @@ class EmbeddingService:
             return self._basic_search(query, top_k, score_threshold, doc_id)
     
     def _generate_query_variations(self, query: str) -> List[str]:
-        if not self.gemini_enabled:
+        if not self.anthropic_enabled:
             return [query]
         
         try:
-            prompt = f"""
-            Generate 2 alternative search queries for: "{query}"
+            prompt = f"""Generate 2 alternative search queries for: "{query}"
+
+Make them:
+1. Use synonyms and related terms
+2. More specific or more general version
+
+Return only the alternative queries, one per line (no numbering):"""
             
-            Make them:
-            1. Use synonyms and related terms
-            2. More specific or more general version
-            
-            Return only the alternative queries, one per line (no numbering):
-            """
-            
-            response = self.gemini_model.generate_content(prompt)
+            response = self._call_anthropic(prompt, max_tokens=150)
             variations = [query]
             
-            if response and response.text:
-                lines = response.text.strip().split('\n')
+            if response:
+                lines = response.strip().split('\n')
                 for line in lines:
                     line = line.strip()
                     line = re.sub(r'^\d+\.?\s*', '', line)
@@ -546,7 +594,7 @@ class EmbeddingService:
                 "storage_size_mb": storage_size,
                 "metadata_count": len(self.chunk_metadata),
                 "index_exists": self.index is not None,
-                "gemini_enabled": self.gemini_enabled
+                "anthropic_enabled": self.anthropic_enabled
             }
         except Exception as e:
             logger.error(f"Error getting stats: {str(e)}")
@@ -559,16 +607,16 @@ class EmbeddingService:
                 "storage_size_mb": 0,
                 "metadata_count": 0,
                 "index_exists": False,
-                "gemini_enabled": False,
+                "anthropic_enabled": False,
                 "error": str(e)
             }
     
     def search_document_only(self, query: str, doc_id: str, top_k: int = 5, 
-                           score_threshold: float = 0.3, use_gemini: bool = True) -> List[Dict]:
+                           score_threshold: float = 0.3, use_claude: bool = True) -> List[Dict]:
         if not doc_id:
             raise ValueError("doc_id is required for document-specific search")
         
-        return self.search_similar(query, top_k, score_threshold, doc_id, use_gemini)
+        return self.search_similar(query, top_k, score_threshold, doc_id, use_claude)
     
     def get_document_stats(self, doc_id: str) -> Dict:
         if not doc_id:

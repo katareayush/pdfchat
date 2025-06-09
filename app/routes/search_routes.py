@@ -5,7 +5,6 @@ import asyncio
 import logging
 from concurrent.futures import ThreadPoolExecutor
 from app.services.embedding_service import embedding_service
-from app.models.search_models import SearchRequest, SearchResponse, SearchResult, EmbeddingStats
 
 logger = logging.getLogger(__name__)
 router = APIRouter()
@@ -24,147 +23,24 @@ async def enhanced_search_with_context_analysis(
         if embedding_service is None:
             raise HTTPException(status_code=503, detail="Search service not available")
         
-        fast_results = embedding_service._basic_search(
-            query=query,
-            top_k=top_k * 2,
-            score_threshold=0.25,
-            doc_id=doc_id
+        enhanced_result = await asyncio.get_event_loop().run_in_executor(
+            executor,
+            embedding_service.search_with_context_analysis,
+            query,
+            top_k,
+            doc_id
         )
         
-        relevant_results = filter_relevant_results(query, fast_results)
-        
         search_time_ms = (time.time() - start_time) * 1000
+        enhanced_result["search_time_ms"] = search_time_ms
         
-        response = {
-            "query": query,
-            "results": relevant_results[:top_k],
-            "total_found": len(relevant_results),
-            "search_time_ms": search_time_ms,
-            "llm_analysis": None,
-            "contextual_answer": None
-        }
-        
-        if (hasattr(embedding_service, 'gemini_enabled') and 
-            embedding_service.gemini_enabled and 
-            relevant_results):
-            
-            try:
-                combined_context = "\n\n".join([
-                    f"Page {result['page']}: {result['context'][:300]}"
-                    for result in relevant_results[:5]
-                ])
-                
-                llm_analysis = await generate_contextual_answer(
-                    query, combined_context, relevant_results
-                )
-                
-                response.update(llm_analysis)
-                
-            except Exception as e:
-                logger.error(f"LLM analysis failed: {str(e)}")
-                response["llm_analysis"] = {
-                    "status": "failed",
-                    "error": str(e)
-                }
-        else:
-            response["llm_analysis"] = {
-                "status": "unavailable",
-                "reason": "Gemini not enabled or no results found"
-            }
-        
-        return response
+        return enhanced_result
         
     except HTTPException:
         raise
     except Exception as e:
+        logger.error(f"Enhanced search failed: {str(e)}")
         raise HTTPException(status_code=500, detail=f"Enhanced search failed: {str(e)}")
-
-async def generate_contextual_answer(query: str, combined_context: str, search_results: list) -> Dict[str, Any]:
-    try:
-        relevance_prompt = f"""
-        Analyze if the provided document content can answer the user's question.
-        
-        Question: "{query}"
-        
-        Document Content:
-        {combined_context[:1000]}
-        
-        Respond with only:
-        - "RELEVANT" if the content contains information that can answer the question
-        - "NOT_RELEVANT" if the content does not contain relevant information
-        - "PARTIAL" if the content has some related information but cannot fully answer
-        
-        Response:"""
-        
-        relevance_response = embedding_service.gemini_model.generate_content(relevance_prompt)
-        relevance = relevance_response.text.strip().upper() if relevance_response.text else "NOT_RELEVANT"
-        
-        logger.info(f"Relevance check for query '{query}': {relevance}")
-        
-        if relevance == "NOT_RELEVANT":
-            return {
-                "llm_analysis": {
-                    "status": "completed",
-                    "relevance_check": "not_relevant"
-                },
-                "contextual_answer": "This information is not available in the document.",
-                "answer_type": "not_available"
-            }
-        
-        answer_prompt = f"""
-        Based on the document content provided, answer the user's question accurately and concisely.
-        
-        Question: "{query}"
-        
-        Document Content:
-        {combined_context[:1500]}
-        
-        Guidelines:
-        1. Only use information explicitly mentioned in the document
-        2. If you cannot find a complete answer, say "The document provides partial information about this topic"
-        3. Be specific and cite page numbers when possible
-        4. Keep the answer under 200 words
-        5. If the information is unclear or contradictory, mention that
-        
-        Answer:"""
-        
-        answer_response = embedding_service.gemini_model.generate_content(answer_prompt)
-        contextual_answer = answer_response.text.strip() if answer_response.text else ""
-        
-        answer_type = determine_answer_type(contextual_answer, relevance)
-        
-        return {
-            "llm_analysis": {
-                "status": "completed",
-                "relevance_check": relevance.lower(),
-                "processing_time_ms": 0
-            },
-            "contextual_answer": contextual_answer,
-            "answer_type": answer_type
-        }
-        
-    except Exception as e:
-        logger.error(f"Error generating contextual answer: {str(e)}")
-        return {
-            "llm_analysis": {
-                "status": "error",
-                "error": str(e)
-            },
-            "contextual_answer": "Unable to analyze the document content at this time.",
-            "answer_type": "error"
-        }
-
-def determine_answer_type(answer: str, relevance: str) -> str:
-    answer_lower = answer.lower()
-    
-    if relevance == "NOT_RELEVANT":
-        return "not_available"
-    elif "partial information" in answer_lower or relevance == "PARTIAL":
-        return "partial"
-    elif relevance == "RELEVANT":
-        return "comprehensive"
-    else:
-        return "basic"
 
 def filter_relevant_results(query: str, results: list, min_relevance_score: float = 0.25) -> list:
     if not results or not query:
@@ -255,20 +131,18 @@ async def check_query_context(
                 "reason": "No relevant content found"
             }
         
-        if hasattr(embedding_service, 'gemini_enabled') and embedding_service.gemini_enabled:
-            combined_context = "\n".join([r['context'][:200] for r in results[:2]])
+        if embedding_service.anthropic_enabled:
+            combined_context = "\n".join([r['context'][:500] for r in results[:2]])
             
-            prompt = f"""
-            Can this content answer the question "{query}"?
+            prompt = f"""Can this content answer the question "{query}"?
             
-            Content: {combined_context}
-            
-            Reply with: YES, NO, or PARTIAL
-            """
+Content: {combined_context}
+
+Reply with: YES, NO, or PARTIAL"""
             
             try:
-                response = embedding_service.gemini_model.generate_content(prompt)
-                relevance = response.text.strip().upper() if response.text else "NO"
+                response = embedding_service._call_anthropic(prompt, max_tokens=10)
+                relevance = response.strip().upper() if response else "NO"
                 
                 can_answer = relevance in ["YES", "PARTIAL"]
                 
@@ -293,6 +167,116 @@ async def check_query_context(
         
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Context check failed: {str(e)}")
+
+@router.get("/search/debug")
+async def debug_search(
+    query: str = Query(..., description="Search query for debugging"),
+    doc_id: Optional[str] = Query(default=None, description="Document to search in")
+):
+    try:
+        if embedding_service is None:
+            raise HTTPException(status_code=503, detail="Search service not available")
+        
+        all_results = embedding_service._basic_search(
+            query=query,
+            top_k=20,
+            score_threshold=0.05,
+            doc_id=doc_id
+        )
+        
+        import re
+        query_lower = query.lower()
+        clause_numbers = re.findall(r'\b(\d+(?:\.\d+)*)\b', query)
+        query_terms = [term.strip() for term in re.split(r'[^\w\.]', query_lower) if len(term.strip()) > 2]
+        
+        related_pages = []
+        for embedding_id, metadata in embedding_service.chunk_metadata.items():
+            if doc_id and metadata.get("doc_id") != doc_id:
+                continue
+            
+            content = metadata.get("text_chunk", "").lower()
+            
+            matches = []
+            for term in query_terms:
+                if term in content:
+                    matches.append(f"'{term}'")
+            
+            for number in clause_numbers:
+                if number in content:
+                    matches.append(f"number '{number}'")
+            
+            if matches:
+                related_pages.append({
+                    "page": metadata.get("page_number"),
+                    "embedding_id": embedding_id,
+                    "matches": matches,
+                    "preview": metadata.get("text_chunk", "")[:200] + "..."
+                })
+        
+        return {
+            "query": query,
+            "extracted_terms": query_terms,
+            "extracted_numbers": clause_numbers,
+            "search_results": [
+                {
+                    "page": r["page"],
+                    "score": r["score"],
+                    "preview": r["context"][:150] + "..."
+                }
+                for r in all_results[:10]
+            ],
+            "content_matches": related_pages,
+            "total_embeddings": len(embedding_service.chunk_metadata),
+            "pages_searched": len(set(r["page"] for r in all_results)) if all_results else 0
+        }
+        
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Debug search failed: {str(e)}")
+
+@router.get("/search/pages")
+async def list_searchable_pages(
+    doc_id: Optional[str] = Query(default=None, description="Document to examine")
+):
+    try:
+        if embedding_service is None:
+            raise HTTPException(status_code=503, detail="Search service not available")
+        
+        pages_info = {}
+        for embedding_id, metadata in embedding_service.chunk_metadata.items():
+            if doc_id and metadata.get("doc_id") != doc_id:
+                continue
+                
+            page_num = metadata.get("page_number")
+            if page_num not in pages_info:
+                pages_info[page_num] = {
+                    "page": page_num,
+                    "chunks": 0,
+                    "total_chars": 0,
+                    "detected_patterns": [],
+                    "preview": ""
+                }
+            
+            pages_info[page_num]["chunks"] += 1
+            pages_info[page_num]["total_chars"] += metadata.get("char_count", 0)
+            
+            content = metadata.get("text_chunk", "")
+            if not pages_info[page_num]["preview"]:
+                pages_info[page_num]["preview"] = content[:300] + "..."
+            
+            import re
+            numbered_patterns = re.findall(r'(\d+(?:\.\d+)*)\s+([A-Za-z][^0-9\n]{5,50})', content)
+            for match in numbered_patterns:
+                pattern_info = f"{match[0]} {match[1][:30]}..."
+                if pattern_info not in pages_info[page_num]["detected_patterns"]:
+                    pages_info[page_num]["detected_patterns"].append(pattern_info)
+        
+        return {
+            "total_pages": len(pages_info),
+            "pages": sorted(pages_info.values(), key=lambda x: x["page"])
+        }
+        
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Pages listing failed: {str(e)}")
 
 @router.get("/search/fast")
 async def fast_search(

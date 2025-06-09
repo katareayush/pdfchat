@@ -3,6 +3,7 @@ import uuid
 import pdfplumber
 import io
 import os
+import re
 from typing import List, Dict, Optional
 from datetime import datetime
 from pathlib import Path
@@ -18,10 +19,11 @@ class PDFService:
         self.upload_dir.mkdir(exist_ok=True)
     
     def extract_text_by_page(self, pdf_file_bytes: bytes) -> List[Dict]:
+        """Extract text with improved chunking that preserves clause structure"""
         extracted_pages = []
         
         try:
-            logger.info("Starting PDF text extraction...")
+            logger.info("Starting PDF text extraction with improved chunking...")
             
             with pdfplumber.open(io.BytesIO(pdf_file_bytes)) as pdf:
                 total_pages = len(pdf.pages)
@@ -33,12 +35,28 @@ class PDFService:
                         
                         if text and text.strip():
                             clean_text = text.strip()
-                            extracted_pages.append({
-                                "page_number": page_num,
-                                "text_chunk": clean_text,
-                                "char_count": len(clean_text)
-                            })
-                            logger.debug(f"Page {page_num}: {len(clean_text)} chars")
+                            
+                            # Check if this page contains clause structures and is long
+                            chunks = self._smart_chunk_page(clean_text, page_num)
+                            
+                            if chunks and len(chunks) > 1:
+                                # Add each chunk as a separate "sub-page"
+                                for i, chunk in enumerate(chunks):
+                                    extracted_pages.append({
+                                        "page_number": page_num,  # Keep original page number
+                                        "text_chunk": chunk,
+                                        "char_count": len(chunk),
+                                        "chunk_id": f"{page_num}.{i+1}"  # Add chunk identifier
+                                    })
+                                    logger.debug(f"Page {page_num}.{i+1}: {len(chunk)} chars")
+                            else:
+                                # Single chunk for the whole page
+                                extracted_pages.append({
+                                    "page_number": page_num,
+                                    "text_chunk": clean_text,
+                                    "char_count": len(clean_text)
+                                })
+                                logger.debug(f"Page {page_num}: {len(clean_text)} chars")
                         else:
                             extracted_pages.append({
                                 "page_number": page_num,
@@ -59,8 +77,83 @@ class PDFService:
             logger.error(f"PDF extraction error: {str(e)}")
             raise HTTPException(status_code=400, detail=f"Error extracting PDF: {str(e)}")
             
-        logger.info(f"Text extraction completed: {len(extracted_pages)} pages processed")
+        logger.info(f"Text extraction completed: {len(extracted_pages)} chunks processed")
         return extracted_pages
+    
+    def _smart_chunk_page(self, text: str, page_num: int) -> List[str]:
+        """Smart chunking that preserves clause and section structure"""
+        
+        # Don't chunk if text is reasonably short
+        if len(text) <= 5000:  # Increased from 3000 to 5000
+            return [text]
+        
+        # Look for clause/section patterns
+        clause_pattern = r'^\s*(\d+(?:\.\d+)*)\s+([A-Z][^0-9\n]*)'
+        
+        lines = text.split('\n')
+        chunks = []
+        current_chunk = []
+        current_length = 0
+        max_chunk_size = 4000  # Increased from 2500 to 4000
+        
+        for line in lines:
+            line_stripped = line.strip()
+            
+            # Check if this line starts a new clause/section
+            clause_match = re.match(clause_pattern, line_stripped)
+            
+            if clause_match and current_chunk and current_length > 1000:
+                # Start new chunk at clause boundary
+                chunk_text = '\n'.join(current_chunk)
+                chunks.append(chunk_text)
+                logger.debug(f"Created chunk at clause boundary: {clause_match.group(1)} (length: {len(chunk_text)})")
+                current_chunk = [line]
+                current_length = len(line)
+            else:
+                current_chunk.append(line)
+                current_length += len(line) + 1
+                
+                # If chunk gets too large, split at sentence boundary
+                if current_length > max_chunk_size:
+                    # Find a good break point (sentence end)
+                    chunk_text = '\n'.join(current_chunk)
+                    last_sentence = chunk_text.rfind('. ')
+                    
+                    if last_sentence > len(chunk_text) * 0.7:  # Good break point found
+                        chunks.append(chunk_text[:last_sentence + 1])
+                        remaining = chunk_text[last_sentence + 2:].strip()
+                        current_chunk = [remaining] if remaining else []
+                        current_length = len(remaining) if remaining else 0
+                        logger.debug(f"Split chunk at sentence boundary (length: {last_sentence + 1})")
+                    else:
+                        # No good break point, force split
+                        chunks.append(chunk_text)
+                        current_chunk = []
+                        current_length = 0
+                        logger.debug(f"Force split chunk (length: {len(chunk_text)})")
+        
+        # Add remaining content
+        if current_chunk:
+            final_chunk = '\n'.join(current_chunk)
+            chunks.append(final_chunk)
+        
+        # Filter out very small chunks (merge with previous)
+        filtered_chunks = []
+        for chunk in chunks:
+            if len(chunk.strip()) < 200 and filtered_chunks:
+                # Merge with previous chunk
+                filtered_chunks[-1] += '\n' + chunk
+                logger.debug(f"Merged small chunk with previous")
+            else:
+                filtered_chunks.append(chunk)
+        
+        # Log final chunking result
+        if len(filtered_chunks) > 1:
+            logger.info(f"Page {page_num} split into {len(filtered_chunks)} chunks")
+            for i, chunk in enumerate(filtered_chunks):
+                logger.debug(f"  Chunk {i+1}: {len(chunk)} chars")
+        
+        return filtered_chunks if len(filtered_chunks) > 1 else [text]
     
     def save_pdf_file(self, pdf_bytes: bytes, doc_id: str, filename: str) -> Path:
         file_path = self.upload_dir / f"{doc_id}_{filename}"
