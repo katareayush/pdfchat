@@ -17,7 +17,6 @@ COPY app/ ./app/
 COPY display/ ./display/
 
 RUN echo "=== Files in /app ===" && ls -la
-RUN echo "=== Frontend check ===" && ls -la frontend/ || echo "No frontend dir"
 
 RUN mkdir -p uploads data models
 
