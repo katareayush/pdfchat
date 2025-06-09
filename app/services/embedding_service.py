@@ -294,7 +294,7 @@ Document Content:
 
 Instructions:
 1. Use ONLY information explicitly stated in the document
-2. Quote exact text when possible
+2. Quote exact text when possible but return in a well structured answer
 3. Include specific page numbers when referencing information
 4. If information is incomplete, state what IS available and what is missing
 5. Be thorough and accurate
