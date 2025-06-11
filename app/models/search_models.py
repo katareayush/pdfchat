@@ -57,6 +57,8 @@ class EmbeddingStats(BaseModel):
     unique_documents: int = Field(..., description="Number of unique documents")
     storage_size_mb: float = Field(..., description="Storage size in megabytes")
     gemini_enabled: bool = Field(..., description="Whether Gemini AI is available")
+    class Config:
+        protected_namespaces = ()
 
 class SearchHealthResponse(BaseModel):
     service: str = Field(..., description="Service name")
@@ -66,3 +68,5 @@ class SearchHealthResponse(BaseModel):
     model_loaded: Optional[bool] = Field(default=None, description="Whether embedding model is loaded")
     gemini_enabled: Optional[bool] = Field(default=None, description="Whether Gemini AI is enabled")
     last_check: datetime = Field(default_factory=datetime.utcnow, description="Last health check time")
+    class Config:
+        protected_namespaces = ()
