@@ -175,7 +175,7 @@ class PDFService:
             
             image = self._preprocess_image_for_ocr(image)
             
-            custom_config = r'--oem 3 --psm 6 -c tessedit_char_whitelist=0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz.,!?;:()[]{}"-+=*/%@#$&'
+            custom_config = r'--oem 3 --psm 6'
             
             try:
                 ocr_text = pytesseract.image_to_string(
